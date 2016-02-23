@@ -26,6 +26,7 @@ import "C"
 import (
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -109,7 +110,10 @@ type Event struct {
 func fsevtCallback(stream C.FSEventStreamRef, info unsafe.Pointer, numEvents C.size_t, paths **C.char, flags *C.FSEventStreamEventFlags, ids *C.FSEventStreamEventId) {
 	events := make([]Event, int(numEvents))
 
-	es := (*EventStream)(info)
+	es := registry.Get(info)
+	if es == nil {
+		return
+	}
 
 	for i := 0; i < int(numEvents); i++ {
 		cpaths := uintptr(unsafe.Pointer(paths)) + (uintptr(i) * unsafe.Sizeof(*paths))
@@ -166,6 +170,7 @@ type EventStream struct {
 	stream       C.FSEventStreamRef
 	rlref        C.CFRunLoopRef
 	hasFinalizer bool
+	registryID   unsafe.Pointer
 
 	Events  chan []Event
 	Paths   []string
@@ -174,6 +179,43 @@ type EventStream struct {
 	Resume  bool
 	Latency time.Duration
 	Device  int32
+}
+
+// eventStreamRegistry is a lookup table for EventStream references passed to
+// cgo. In Go 1.6+ passing a Go pointer to a Go pointer to cgo is not allowed.
+// To get around this issue, we pass only a C pointer to 1 byte.
+type eventStreamRegistry struct {
+	sync.Mutex
+	m map[unsafe.Pointer]*EventStream
+}
+
+var registry = eventStreamRegistry{m: map[unsafe.Pointer]*EventStream{}}
+
+func (r *eventStreamRegistry) Add(e *EventStream) unsafe.Pointer {
+	r.Lock()
+	defer r.Unlock()
+
+	i := C.malloc(1)
+	if i == nil {
+		panic(syscall.ENOMEM)
+	}
+	r.m[i] = e
+	return i
+}
+
+func (r *eventStreamRegistry) Get(i unsafe.Pointer) *EventStream {
+	r.Lock()
+	defer r.Unlock()
+
+	return r.m[i]
+}
+
+func (r *eventStreamRegistry) Delete(i unsafe.Pointer) {
+	r.Lock()
+	defer r.Unlock()
+
+	C.free(i)
+	delete(r.m, i)
 }
 
 func finalizer(es *EventStream) {
@@ -205,7 +247,8 @@ func (es *EventStream) Start() {
 		es.Events = make(chan []Event)
 	}
 
-	context := C.FSEventStreamContext{info: unsafe.Pointer(es)}
+	es.registryID = registry.Add(es)
+	context := C.FSEventStreamContext{info: es.registryID}
 	latency := C.CFTimeInterval(float64(es.Latency) / float64(time.Second))
 	if es.Device != 0 {
 		es.stream = C.EventStreamCreateRelativeToDevice(&context, C.dev_t(es.Device), cPaths, since, latency, C.FSEventStreamCreateFlags(es.Flags))
@@ -243,8 +286,10 @@ func (es *EventStream) Stop() {
 		C.FSEventStreamInvalidate(es.stream)
 		C.FSEventStreamRelease(es.stream)
 		C.CFRunLoopStop(es.rlref)
+		registry.Delete(es.registryID)
 	}
 	es.stream = nil
+	es.registryID = nil
 }
 
 // Restart listening.
