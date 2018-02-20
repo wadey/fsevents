@@ -2,9 +2,9 @@ sudo: false
 language: go
 os: osx
 go:
-  - "stable"
-  - "1.9"
   - "1.10"
+  - "1.9"
+  - "stable"
 
 matrix:
   include:
