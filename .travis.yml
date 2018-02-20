@@ -18,7 +18,7 @@ matrix:
   fast_finish: true
 
 before_script:
-  - sw_vers || :
+  - if which sw_vers; then sw_vers; fi
   - go get -u github.com/golang/lint/golint
 
 script:
