@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/fsnotify/fsevents"
+	"github.com/wadey/fsevents"
 )
 
 func main() {
